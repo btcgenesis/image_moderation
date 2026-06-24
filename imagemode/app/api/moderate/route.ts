@@ -1,19 +1,15 @@
-import "@tensorflow/tfjs-node";
-import * as tf from "@tensorflow/tfjs-node";
+import * as tf from "@tensorflow/tfjs";
+import { setWasmPaths } from "@tensorflow/tfjs-backend-wasm";
+import "@tensorflow/tfjs-backend-wasm";
 import * as nsfwjs from "nsfwjs";
 import sharp from "sharp";
 import { NextRequest, NextResponse } from "next/server";
 import path from "path";
-
-// ─── Types ───────────────────────────────────────────────────────────────────
+import fs from "fs";
 
 interface ModerateResponse {
   safe: boolean;
-  scores: {
-    porn: number;
-    hentai: number;
-    sexy: number;
-  };
+  scores: { porn: number; hentai: number; sexy: number };
   predictions: nsfwjs.predictionType[];
 }
 
@@ -21,17 +17,52 @@ interface ErrorResponse {
   error: string;
 }
 
-// ─── Model ───────────────────────────────────────────────────────────────────
-
-const globalWithModel = global as typeof global & { nsfwModel?: nsfwjs.NSFWJS };
+const globalWithModel = global as typeof global & {
+  nsfwModel?: nsfwjs.NSFWJS;
+  tfReady?: boolean;
+};
 
 async function getModel(): Promise<nsfwjs.NSFWJS> {
-  if (!globalWithModel.nsfwModel) {
+  if (!globalWithModel.tfReady) {
     tf.enableProdMode();
+    const wasmDir = path.join(process.cwd(), "public/wasm/");
+    setWasmPaths(`file://${wasmDir}`);
+    await tf.setBackend("wasm");
     await tf.ready();
-    const modelPath = `file://${path.join(process.cwd(), "public/models/mobilenet_v2/model.json")}`;
-    globalWithModel.nsfwModel = await nsfwjs.load(modelPath);
+    globalWithModel.tfReady = true;
   }
+
+  if (!globalWithModel.nsfwModel) {
+    const modelJsonPath = path.join(process.cwd(), "public/models/mobilenet_v2/model.json");
+    const modelJson = JSON.parse(fs.readFileSync(modelJsonPath, "utf-8"));
+    const modelDir = path.dirname(modelJsonPath);
+
+    const weightData = modelJson.weightsManifest
+      .flatMap((group: any) => group.paths)
+      .map((p: string) => fs.readFileSync(path.join(modelDir, p)));
+
+    const concatenated = Buffer.concat(weightData);
+
+    const modelArtifacts: tf.io.ModelArtifacts = {
+      modelTopology: modelJson.modelTopology,
+      weightSpecs: modelJson.weightsManifest.flatMap((g: any) => g.weights),
+      weightData: concatenated.buffer.slice(
+        concatenated.byteOffset,
+        concatenated.byteOffset + concatenated.byteLength
+      ),
+      format: modelJson.format,
+      generatedBy: modelJson.generatedBy,
+      convertedBy: modelJson.convertedBy,
+    };
+
+    const ioHandler: { load: () => Promise<tf.io.ModelArtifacts> } = {
+      load: async () => modelArtifacts,
+    };
+
+    globalWithModel.nsfwModel = new nsfwjs.NSFWJS(ioHandler, { size: 224 });
+    await globalWithModel.nsfwModel.load();
+  }
+
   return globalWithModel.nsfwModel;
 }
 
@@ -58,9 +89,8 @@ export async function OPTIONS(req: NextRequest) {
 
 function isAuthorized(req: NextRequest): boolean {
   const apiKey = process.env.MODERATION_API_KEY;
-  if (!apiKey) return true; // no key configured = open
-  const authHeader = req.headers.get("authorization");
-  return authHeader === `Bearer ${apiKey}`;
+  if (!apiKey) return true;
+  return req.headers.get("authorization") === `Bearer ${apiKey}`;
 }
 
 // ─── Image loading ───────────────────────────────────────────────────────────
@@ -73,8 +103,8 @@ async function bufferFromRequest(req: NextRequest): Promise<Buffer> {
     if (!url || typeof url !== "string") throw new Error("Missing or invalid 'url' field");
     const res = await fetch(url);
     if (!res.ok) throw new Error(`Failed to fetch image from URL: ${res.statusText}`);
-    const ct = res.headers.get("content-type") ?? "";
-    if (!ct.startsWith("image/")) throw new Error("URL did not return an image");
+    if (!(res.headers.get("content-type") ?? "").startsWith("image/"))
+      throw new Error("URL did not return an image");
     return Buffer.from(await res.arrayBuffer());
   }
 
@@ -103,10 +133,22 @@ export async function POST(
 
   try {
     const buffer = await bufferFromRequest(req);
-    const normalized = await sharp(buffer).toFormat("jpeg").toBuffer();
-    const imageTensor = tf.node.decodeImage(normalized, 3) as tf.Tensor3D;
 
+    // Initialize backend + model first
     const nsfwModel = await getModel();
+
+    // Only create tensor after backend is ready
+    const { data, info } = await sharp(buffer)
+      .resize(224, 224)        // resize to exact model input size
+      .removeAlpha()           // strip alpha channel if present
+      .toColorspace("srgb")    // ensure RGB colorspace
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    
+    const imageTensor = tf.tensor3d(
+      new Uint8Array(data),
+      [info.height, info.width, 3]  // hardcode 3 channels, don't trust info.channels
+    );
 
     let predictions: nsfwjs.predictionType[];
     try {
@@ -130,9 +172,8 @@ export async function POST(
     );
   } catch (error) {
     const message = error instanceof Error ? error.message : "Moderation failed";
-    const status = message.includes("Unauthorized") ? 401
-      : message.includes("Invalid") || message.includes("No image") || message.includes("Missing") ? 400
-      : 500;
+    const status =
+      message.includes("Invalid") || message.includes("No image") || message.includes("Missing") ? 400 : 500;
     console.error("Moderation error:", error);
     return NextResponse.json({ error: message }, { status, headers });
   }
