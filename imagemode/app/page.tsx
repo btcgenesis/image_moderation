@@ -138,7 +138,7 @@ export default function Home() {
           </div>
 
           <div className="px-5 py-4">
-            <div className="grid grid-cols-3 gap-3 mb-4">
+            {/* <div className="grid grid-cols-3 gap-3 mb-4">
               {scores.map(({ label, value }) => (
                 <div key={label} className="bg-gray-50 rounded-lg p-3 text-center">
                   <p className="text-xs text-gray-400 uppercase tracking-wide mb-1">{label}</p>
@@ -146,9 +146,9 @@ export default function Home() {
                   <ScoreBar value={value} />
                 </div>
               ))}
-            </div>
+            </div> */}
 
-            <button
+            {/* <button
               onClick={() => setShowRaw(!showRaw)}
               className="flex items-center gap-1.5 text-sm text-gray-400 hover:text-gray-600 pt-3 border-t border-gray-100 w-full transition"
             >
@@ -162,7 +162,7 @@ export default function Home() {
               <pre className="mt-3 p-3 bg-gray-50 rounded-lg text-xs text-gray-500 overflow-x-auto">
                 {JSON.stringify(result.predictions, null, 2)}
               </pre>
-            )}
+            )} */}
           </div>
         </div>
       )}
